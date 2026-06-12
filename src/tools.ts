@@ -12,7 +12,7 @@ import { Renderer, RenderedSound } from "./core/renderer.js";
 import { parseSoundRef } from "./core/soundref.js";
 import { exportSound, ManifestEntry } from "./core/exporter.js";
 import { generateAuditionPage, AuditionSound } from "./core/audition.js";
-import { ValidationError, jitterSchema, validateOrThrow } from "./schema.js";
+import { ValidationError, jitterSchema, validateOrThrow, collectUnknownKeys } from "./schema.js";
 import { worstSeverity } from "./analysis/lint.js";
 import { renderSpectrogramPng, renderWaveformPng, renderComparePng, renderVariantStripPng } from "./analysis/spectrogram.js";
 import { BANDS } from "./analysis/spectral.js";
@@ -51,29 +51,59 @@ function guard<A extends unknown[]>(fn: (...args: A) => Promise<ToolResult>): (.
   };
 }
 
-const RECIPE_TOP_KEYS = new Set([
-  "name", "description", "duration_ms", "channels", "seed", "hidden", "layers", "bus", "master", "loop", "variants", "lint",
-]);
-const LAYER_KEYS = new Set(["id", "source", "filters", "envelope", "lfo", "gain_db", "delay_ms"]);
-
-function unknownKeyWarnings(input: unknown): string[] {
-  const warnings: string[] = [];
-  if (input === null || typeof input !== "object") return warnings;
-  for (const key of Object.keys(input)) {
-    if (!RECIPE_TOP_KEYS.has(key)) warnings.push(`unknown key "/${key}" ignored`);
+/**
+ * Unknown-key handling shared by write_recipe / patch_recipe / patch_layer.
+ * Lenient (default): keys the schema would drop become warnings. Strict: the
+ * write is refused so a typo like `filter` for `filters` can't silently lose
+ * data. The pointer list comes from collectUnknownKeys (co-located with the
+ * schema so it stays in sync).
+ */
+function checkUnknownKeys(input: unknown, strict: boolean): { warnings: string[]; error?: ReturnType<typeof fail> } {
+  const unknown = collectUnknownKeys(input);
+  if (strict && unknown.length > 0) {
+    return {
+      warnings: [],
+      error: fail({
+        error: "unknown_keys",
+        message: `strict mode: ${unknown.length} unknown key(s) the schema would drop; fix the typo(s) or omit strict. See list_presets.recipe_skeleton for the exact shape.`,
+        keys: unknown,
+      }),
+    };
   }
-  const layers = (input as Record<string, unknown>).layers;
-  if (Array.isArray(layers)) {
-    layers.forEach((layer, i) => {
-      if (layer && typeof layer === "object") {
-        for (const key of Object.keys(layer)) {
-          if (!LAYER_KEYS.has(key)) warnings.push(`unknown key "/layers/${i}/${key}" ignored`);
-        }
-      }
-    });
-  }
-  return warnings;
+  return { warnings: unknown.map((p) => `unknown key "${p}" ignored`) };
 }
+
+/**
+ * A complete, valid recipe shown by list_presets so the document shape — and
+ * especially the plural container names (layers, filters, bus) that are easy to
+ * mis-guess — is unambiguous on first contact. Fields not shown take defaults.
+ */
+const RECIPE_SKELETON = {
+  name: "example_sound",
+  description: "what this sound is for",
+  duration_ms: 400,
+  seed: 0,
+  layers: [
+    {
+      id: "body",
+      source: { type: "osc", shape: "sine", freq_hz: 220, pitch_env: { end_semitones: -12, curve: "exp" } },
+      filters: [{ type: "lowpass", cutoff_hz: 2000, q: 0.7 }],
+      envelope: { attack_ms: 2, decay_ms: 120, sustain: 0, release_ms: 40, curve: "exp" },
+      gain_db: -6,
+    },
+    {
+      id: "texture",
+      source: { type: "sample", file: "refs/whoosh.wav", rate: 1, reverse: false, pitch_env: { end_semitones: 7, curve: "lin" } },
+      gain_db: -12,
+      delay_ms: 10,
+    },
+  ],
+  bus: [{ type: "waveshaper", drive_db: 8, shape: "tanh" }],
+  master: { gain_db: 0, dc_block: true },
+  loop: { enabled: false },
+  loudness: { mode: "none" },
+  lint: { allow: [] },
+};
 
 function findingsSummary(sound: RenderedSound) {
   return sound.findings.map((f) => ({ code: f.code, severity: f.severity, message: f.message }));
@@ -113,7 +143,7 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
   const store = new RecipeStore(ws);
   const renderer = new Renderer(ws, store);
 
-  const server = new McpServer({ name: "mixdown", version: "0.2.0" });
+  const server = new McpServer({ name: "mixdown", version: "0.3.0" });
 
   const soundrefDesc = 'Sound reference: name[@version][#variant] (e.g. "stone_impact", "stone_impact@3", "stone_impact#2") or a "refs/" file path.';
 
@@ -169,14 +199,16 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
     "write_recipe",
     {
       description:
-        "Create or replace a recipe. Validates against the schema, fills defaults, bumps the version, snapshots the previous version to history. Writing a new name creates the sound. Call list_presets for accepted fields and enums.",
+        "Create or replace a recipe. Validates against the schema, fills defaults, bumps the version, snapshots the previous version to history. Writing a new name creates the sound. Call list_presets for accepted fields, enums, and a recipe_skeleton showing the exact shape. Unknown keys are dropped with a warning; pass strict: true to refuse the write instead.",
       inputSchema: {
         name: z.string(),
         recipe: z.record(z.string(), z.unknown()),
+        strict: z.boolean().default(false).describe("refuse the write if any key would be dropped, instead of warning"),
       },
     },
-    guard(async ({ name, recipe }) => {
-      const warnings = unknownKeyWarnings(recipe);
+    guard(async ({ name, recipe, strict }) => {
+      const { warnings, error } = checkUnknownKeys(recipe, strict);
+      if (error) return error;
       const { version } = await store.write(name, recipe);
       return ok({ version, warnings });
     }),
@@ -190,12 +222,14 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
       inputSchema: {
         name: z.string(),
         patch: z.record(z.string(), z.unknown()),
+        strict: z.boolean().default(false).describe("refuse the write if the merged recipe has any key the schema would drop"),
       },
     },
-    guard(async ({ name, patch }) => {
+    guard(async ({ name, patch, strict }) => {
       const { recipe } = await store.read(name);
       const merged = mergePatch(recipe, patch);
-      const warnings = unknownKeyWarnings(merged);
+      const { warnings, error } = checkUnknownKeys(merged, strict);
+      if (error) return error;
       const { version } = await store.write(name, merged);
       return ok({ version, warnings });
     }),
@@ -210,12 +244,14 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
         name: z.string(),
         layer_id: z.string(),
         patch: z.union([z.record(z.string(), z.unknown()), z.null()]),
+        strict: z.boolean().default(false).describe("refuse the write if the patched layer has any key the schema would drop"),
       },
     },
-    guard(async ({ name, layer_id, patch }) => {
+    guard(async ({ name, layer_id, patch, strict }) => {
       const { recipe } = await store.read(name);
       const merged = applyLayerPatch(recipe, layer_id, patch);
-      const warnings = unknownKeyWarnings(merged);
+      const { warnings, error } = checkUnknownKeys(merged, strict);
+      if (error) return error;
       const { version } = await store.write(name, merged);
       return ok({ version, warnings });
     }),
@@ -225,7 +261,7 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
     "list_presets",
     {
       description:
-        "Every enum and field the server accepts: source types, filter types, effect types, curve names, palette resonators and IRs, jitter fields. Call once per session instead of guessing field names.",
+        "Every enum and field the server accepts: source types, filter types, effect types, curve names, palette resonators and IRs, jitter fields, plus a recipe_skeleton showing the exact document shape. Call once per session instead of guessing field names.",
       inputSchema: {},
     },
     guard(async () => {
@@ -233,6 +269,7 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
       return ok({
         engine_version: ENGINE_VERSION,
         soundref: "name[@version][#variant] | refs/filename",
+        recipe_skeleton: RECIPE_SKELETON,
         units: "milliseconds, Hz, dB, semitones, wet 0..1, q unitless",
         curves: ["lin", "exp", "log"],
         sources: {
@@ -254,7 +291,16 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
               excite_ms: "0.1..1000, noise excitation length",
             },
           },
-          sample: { fields: { file: "refs/ path", start_ms: ">=0", end_ms: ">=0" } },
+          sample: {
+            fields: {
+              file: "refs/ path",
+              start_ms: ">=0",
+              end_ms: ">=0",
+              rate: "0.25..4 static playback speed (2 = up an octave and twice as fast); default 1",
+              reverse: "true plays the slice backward",
+              pitch_env: "same shape as osc pitch_env; deterministic pitch sweep over the layer via resampling (rise/fall, breakpoints)",
+            },
+          },
           granular: {
             fields: {
               file: "refs/ path",
@@ -310,9 +356,17 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
           fade_in_ms: "global fade-in over the start of the output",
           fade_out_ms: "global fade-out over the end (incompatible with loop)",
           fade_curve: "lin | exp | log",
+          dc_block: "default true; ~5 Hz high-pass on the master bus that removes DC from bus effects (e.g. waveshaper). Set false only if you intentionally want DC.",
+        },
+        loudness: {
+          mode: ["peak", "lufs", "none"],
+          notes:
+            'normalization applied at export. "none" leaves the rendered level untouched so deliberate loud/quiet relationships between sounds survive. project.loudness is the default; a recipe may carry its own loudness block to override it for one sound (e.g. { mode: "none" }).',
+          fields: { peak_db: "-24..0 (peak mode)", lufs_target: "-36..-8 or null (lufs mode)" },
         },
         recipe_fields: {
           hidden: "true excludes the sound from the audition page (working material)",
+          loudness: 'optional per-recipe loudness override (same shape as project.loudness); use { mode: "none" } to opt this sound out of normalization',
           lint: '{ allow: ["W206", ...] } suppresses intentional findings; they are reported separately and do not block export',
         },
         tails: "delay and reverb ring out past duration_ms automatically; the rendered duration_ms reports the actual length (loops excluded)",

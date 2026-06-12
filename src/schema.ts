@@ -73,6 +73,9 @@ export const sampleSourceSchema = z.object({
   file: z.string().regex(/^refs\//, "must be a refs/ path"),
   start_ms: z.number().min(0).optional(),
   end_ms: z.number().min(0).optional(),
+  rate: z.number().min(0.25).max(4).default(1),
+  reverse: z.boolean().default(false),
+  pitch_env: pitchEnvSchema.optional(),
 });
 
 export const granularSourceSchema = z.object({
@@ -212,6 +215,9 @@ export const masterSchema = z.object({
   fade_in_ms: z.number().min(0).max(30000).default(0),
   fade_out_ms: z.number().min(0).max(30000).default(0),
   fade_curve: curveSchema.default("lin"),
+  // one-pole ~5 Hz high-pass on the master bus; removes DC that originates
+  // downstream of any layer filter (e.g. a bus waveshaper). On by default.
+  dc_block: z.boolean().default(true),
 });
 
 const LFO_DEPTH_LIMITS: Record<string, [number, string]> = {
@@ -219,6 +225,15 @@ const LFO_DEPTH_LIMITS: Record<string, [number, string]> = {
   pitch: [24, "semitones"],
   cutoff: [95, "percent"],
 };
+
+// Loudness normalization, applied at export. "none" leaves the rendered level
+// untouched so deliberate loud/quiet relationships between sounds survive. A
+// recipe may carry its own loudness block to override the project default.
+export const loudnessSchema = z.object({
+  mode: z.enum(["peak", "lufs", "none"]).default("peak"),
+  peak_db: z.number().min(-24).max(0).default(-1),
+  lufs_target: z.number().min(-36).max(-8).nullable().default(null),
+});
 
 export const recipeSchema = z
   .object({
@@ -233,6 +248,9 @@ export const recipeSchema = z
     master: masterSchema.prefault({}),
     loop: loopSchema.prefault({}),
     variants: variantsSchema.optional(),
+    // per-recipe loudness override; when present it replaces the project loudness
+    // for this sound only (use mode "none" to opt this sound out of normalization)
+    loudness: loudnessSchema.optional(),
     lint: z.object({ allow: z.array(z.string().regex(/^[EW]\d{3}$/)).max(16).default([]) }).prefault({}),
   })
   .superRefine((recipe, ctx) => {
@@ -277,12 +295,6 @@ export const recipeSchema = z
 
 // --- project.json ---
 
-export const loudnessSchema = z.object({
-  mode: z.enum(["peak", "lufs"]).default("peak"),
-  peak_db: z.number().min(-24).max(0).default(-1),
-  lufs_target: z.number().min(-36).max(-8).nullable().default(null),
-});
-
 export const projectSchema = z.object({
   sample_rate: z.number().int().min(8000).max(96000).default(44100),
   channels_default: z.enum(["mono", "stereo"]).default("mono"),
@@ -307,6 +319,90 @@ export type Jitter = z.infer<typeof jitterSchema>;
 export type Mode = z.infer<typeof modeSchema>;
 export type PitchEnv = z.infer<typeof pitchEnvSchema>;
 export type Lfo = z.infer<typeof lfoSchema>;
+export type Loudness = z.infer<typeof loudnessSchema>;
+
+// --- unknown-key detection ---
+//
+// The recipe schema strips unknown keys (Zod default), so a typo like `filter`
+// for `filters` silently drops the value. This walks the raw input and reports
+// every key the schema would ignore, by JSON pointer. Keep these sets in sync
+// with the object schemas above; they are co-located for exactly that reason.
+// write_recipe surfaces the list as warnings, or as a hard error in strict mode.
+
+const RECIPE_KEYS = ["name", "description", "duration_ms", "channels", "seed", "hidden", "layers", "bus", "master", "loop", "variants", "loudness", "lint"];
+const LAYER_KEYS = ["id", "source", "filters", "envelope", "lfo", "gain_db", "delay_ms"];
+const SOURCE_KEYS: Record<string, string[]> = {
+  noise: ["type", "color"],
+  osc: ["type", "shape", "freq_hz", "duty", "pitch_env"],
+  modal: ["type", "preset", "modes", "excite", "excite_ms"],
+  sample: ["type", "file", "start_ms", "end_ms", "rate", "reverse", "pitch_env"],
+  granular: ["type", "file", "grain_ms", "density_hz", "position", "position_jitter", "pitch_jitter_semitones"],
+};
+const FILTER_KEYS = ["type", "cutoff_hz", "q", "gain_db", "sweep"];
+const EFFECT_KEYS: Record<string, string[]> = {
+  reverb: ["type", "ir", "wet", "predelay_ms"],
+  delay: ["type", "time_ms", "feedback", "wet"],
+  eq: ["type", "bands"],
+  waveshaper: ["type", "drive_db", "shape"],
+  compressor: ["type", "threshold_db", "ratio", "attack_ms", "release_ms"],
+};
+const ENVELOPE_KEYS = ["attack_ms", "hold_ms", "decay_ms", "sustain", "release_ms", "curve", "attack_curve", "decay_curve", "release_curve"];
+const LFO_KEYS = ["target", "rate_hz", "rate_end_hz", "depth", "curve"];
+const MASTER_KEYS = ["gain_db", "fade_in_ms", "fade_out_ms", "fade_curve", "dc_block"];
+const LOOP_KEYS = ["enabled", "crossfade_ms"];
+const VARIANTS_KEYS = ["count", "jitter"];
+const LOUDNESS_KEYS = ["mode", "peak_db", "lufs_target"];
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/** Report unknown keys (by JSON pointer) the recipe schema would silently drop. */
+export function collectUnknownKeys(input: unknown): string[] {
+  const out: string[] = [];
+  const check = (obj: unknown, allowed: string[], prefix: string) => {
+    if (!isObj(obj)) return;
+    for (const key of Object.keys(obj)) {
+      if (!allowed.includes(key)) out.push(`${prefix}/${key}`);
+    }
+  };
+  if (!isObj(input)) return out;
+  check(input, RECIPE_KEYS, "");
+
+  const layers = input.layers;
+  if (Array.isArray(layers)) {
+    layers.forEach((layer, i) => {
+      const lp = `/layers/${i}`;
+      check(layer, LAYER_KEYS, lp);
+      if (isObj(layer)) {
+        const src = layer.source;
+        if (isObj(src) && typeof src.type === "string" && SOURCE_KEYS[src.type]) {
+          check(src, SOURCE_KEYS[src.type], `${lp}/source`);
+        }
+        if (Array.isArray(layer.filters)) {
+          layer.filters.forEach((f, fi) => check(f, FILTER_KEYS, `${lp}/filters/${fi}`));
+        }
+        check(layer.envelope, ENVELOPE_KEYS, `${lp}/envelope`);
+        check(layer.lfo, LFO_KEYS, `${lp}/lfo`);
+      }
+    });
+  }
+
+  const bus = input.bus;
+  if (Array.isArray(bus)) {
+    bus.forEach((fx, i) => {
+      if (isObj(fx) && typeof fx.type === "string" && EFFECT_KEYS[fx.type]) {
+        check(fx, EFFECT_KEYS[fx.type], `/bus/${i}`);
+      }
+    });
+  }
+
+  check(input.master, MASTER_KEYS, "/master");
+  check(input.loop, LOOP_KEYS, "/loop");
+  check(input.variants, VARIANTS_KEYS, "/variants");
+  check(input.loudness, LOUDNESS_KEYS, "/loudness");
+  return out;
+}
 
 // --- validation error model ---
 

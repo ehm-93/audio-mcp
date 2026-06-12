@@ -117,7 +117,7 @@ describe("end to end", () => {
     expect(sound.bundle.layers.map((l) => l.id)).toEqual(["crack", "body"]);
     expect(sound.bundle.resonances.length).toBeGreaterThan(0);
     expect(sound.bundle.loop_seam_db).toBeNull();
-    expect(sound.bundle.engine_version).toMatch(/^0\.2\.0-node\d+/);
+    expect(sound.bundle.engine_version).toMatch(/^0\.3\.0-node\d+/);
     // the modal body should ring near a palette mode
     expect(sound.bundle.resonances.some((r) => Math.abs(r.freq_hz - 180) < 40 || Math.abs(r.freq_hz - 312) < 40)).toBe(true);
     // performance target from the spec: under 500 ms for 2 s mono; 700 ms sound should be comfortably inside

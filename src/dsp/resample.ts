@@ -64,3 +64,29 @@ export function pitchShift(input: Float32Array, semitones: number): Float32Array
   const speed = Math.pow(2, semitones / 12);
   return resample(input, 1 / speed);
 }
+
+/**
+ * Time-varying sample playback. Reads `input` into a buffer of `outLength`
+ * samples, advancing the read head by `rate * 2^(semitonesAt(t)/12)` per output
+ * sample (t is normalized 0..1 over the output). Output past the end of the
+ * input stays zero. At rate 1 with a zero envelope this is a bit-exact copy
+ * (sinc at integer offsets collapses to the identity), so a plain sample is
+ * unchanged. Band-limits on the fly when playing faster than 1x.
+ */
+export function varispeed(
+  input: Float32Array,
+  outLength: number,
+  rate: number,
+  semitonesAt: (t: number) => number,
+): Float32Array {
+  const out = new Float32Array(outLength);
+  let pos = 0;
+  for (let i = 0; i < outLength; i++) {
+    if (pos >= input.length) break; // remainder stays zero
+    const t = outLength <= 1 ? 0 : i / (outLength - 1);
+    const speed = rate * Math.pow(2, semitonesAt(t) / 12);
+    out[i] = sincRead(input, pos, Math.min(1, 1 / speed));
+    pos += speed;
+  }
+  return out;
+}

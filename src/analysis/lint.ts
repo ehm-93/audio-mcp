@@ -104,7 +104,7 @@ export function lint(buf: AudioBuf, bundle: AnalysisBundle, extras: AnalysisExtr
     findings.push({
       code: "E102",
       severity: "error",
-      message: `DC offset ${bundle.dc_offset_db} dBFS exceeds -60 dBFS; add a highpass filter`,
+      message: `DC offset ${bundle.dc_offset_db} dBFS exceeds -60 dBFS; master.dc_block (default on) removes steady DC even from bus effects. If it is off, re-enable it; if it is already on, the sound is too short to fully settle — lengthen duration_ms or allow E102`,
     });
   }
 
@@ -155,14 +155,17 @@ export function lint(buf: AudioBuf, bundle: AnalysisBundle, extras: AnalysisExtr
     });
   }
 
-  const loudness = ctx.project.loudness;
-  if (loudness.mode === "lufs" && loudness.lufs_target !== null && bundle.lufs_integrated > -119) {
+  // a recipe-level loudness block overrides the project default; "none" opts out
+  const loudness = ctx.recipe?.loudness ?? ctx.project.loudness;
+  if (loudness.mode === "none") {
+    // no normalization target to compare against
+  } else if (loudness.mode === "lufs" && loudness.lufs_target !== null && bundle.lufs_integrated > -119) {
     const delta = bundle.lufs_integrated - loudness.lufs_target;
     if (Math.abs(delta) > 6) {
       findings.push({
         code: "W205",
         severity: "warn",
-        message: `loudness ${bundle.lufs_integrated} LUFS is ${Math.round(delta * 10) / 10} dB from the project target ${loudness.lufs_target} LUFS`,
+        message: `loudness ${bundle.lufs_integrated} LUFS is ${Math.round(delta * 10) / 10} dB from the loudness target ${loudness.lufs_target} LUFS`,
       });
     }
   } else if (loudness.mode === "peak") {
@@ -171,7 +174,7 @@ export function lint(buf: AudioBuf, bundle: AnalysisBundle, extras: AnalysisExtr
       findings.push({
         code: "W205",
         severity: "warn",
-        message: `peak ${bundle.peak_dbfs} dBFS is ${Math.round(delta * 10) / 10} dB from the project target ${loudness.peak_db} dBFS`,
+        message: `peak ${bundle.peak_dbfs} dBFS is ${Math.round(delta * 10) / 10} dB from the loudness target ${loudness.peak_db} dBFS`,
       });
     }
   }

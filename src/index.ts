@@ -18,4 +18,4 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 
 // stdout carries the protocol; log to stderr only
-console.error(`mixdown 0.2.0 ready, workspace: ${root}`);
+console.error(`mixdown 0.3.0 ready, workspace: ${root}`);

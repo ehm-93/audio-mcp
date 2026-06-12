@@ -262,7 +262,7 @@ describe("lint allow-list", () => {
     expect(allowed.suppressed.some((f) => f.code === "W202")).toBe(true);
   });
 
-  it("engine version is 0.2.0", () => {
-    expect(ENGINE_VERSION).toMatch(/^0\.2\.0-node\d+/);
+  it("engine version is 0.3.0", () => {
+    expect(ENGINE_VERSION).toMatch(/^0\.3\.0-node\d+/);
   });
 });

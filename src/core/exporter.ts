@@ -49,14 +49,17 @@ export async function exportSound(
   let buf: AudioBuf = matchChannels(sound.mix, targetChannels);
   buf = resampleTo(buf, targetRate);
 
-  // project loudness: normalize to peak or LUFS target
+  // loudness: a recipe-level block overrides the project default; mode "none"
+  // leaves the rendered level untouched so deliberate loud/quiet relationships
+  // between sounds survive normalization.
+  const loudness = sound.recipe?.loudness ?? project.loudness;
   let gainDb = 0;
-  if (project.loudness.mode === "peak") {
+  if (loudness.mode === "peak") {
     const peak = peakDbfs(buf);
-    if (peak > -Infinity) gainDb = project.loudness.peak_db - peak;
-  } else if (project.loudness.lufs_target !== null) {
+    if (peak > -Infinity) gainDb = loudness.peak_db - peak;
+  } else if (loudness.mode === "lufs" && loudness.lufs_target !== null) {
     const lufs = lufsIntegrated(buf);
-    if (lufs > -Infinity) gainDb = project.loudness.lufs_target - lufs;
+    if (lufs > -Infinity) gainDb = loudness.lufs_target - lufs;
   }
   if (gainDb !== 0) {
     const g = dbToLin(gainDb);

@@ -1,6 +1,6 @@
 {
   "name": "mixdown",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server for designing, analyzing, and exporting game sound effects as deterministic synthesis recipes",
   "license": "MIT-0",
   "author": "",

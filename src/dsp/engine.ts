@@ -21,16 +21,16 @@ import { Recipe, Layer, Project, Mode, Lfo } from "../schema.js";
 import { AudioBuf, createBuf, matchChannels, dbToLin, mixInto, bufLength } from "./buffer.js";
 import { hashSeed, mulberry32 } from "./prng.js";
 import { renderNoise } from "./noise.js";
-import { renderOsc, makeLfo } from "./osc.js";
+import { renderOsc, makeLfo, pitchEnvSemitones } from "./osc.js";
 import { renderModal } from "./modal.js";
 import { renderGranular } from "./granular.js";
-import { pitchShift } from "./resample.js";
+import { pitchShift, varispeed } from "./resample.js";
 import { applyFilter, curveInterp } from "./biquad.js";
 import { applyEnvelope } from "./envelope.js";
 import { applyReverb, applyDelay, applyEq, applyWaveshaper, applyCompressor } from "./effects.js";
 import { applyLoopCrossfade } from "./loop.js";
 
-export const ENGINE_VERSION = `0.2.0-node${process.versions.node.split(".")[0]}`;
+export const ENGINE_VERSION = `0.3.0-node${process.versions.node.split(".")[0]}`;
 
 const TAIL_TRIM_THRESHOLD = Math.pow(10, -66 / 20);
 const TAIL_CAP_SECONDS = 8;
@@ -115,16 +115,25 @@ async function renderSource(
       const endI = src.end_ms != null ? Math.round((src.end_ms / 1000) * sampleRate) : file.channels[0].length;
       const sliced: AudioBuf = {
         sampleRate,
-        channels: file.channels.map((ch) => ch.slice(Math.min(startI, ch.length), Math.min(endI, ch.length))),
+        channels: file.channels.map((ch) => {
+          const cut = ch.slice(Math.min(startI, ch.length), Math.min(endI, ch.length));
+          if (src.reverse) cut.reverse();
+          return cut;
+        }),
       };
       const matched = matchChannels(sliced, numChannels);
-      // pad or trim to the layer length
+      const pitched = src.rate !== 1 || src.pitch_env !== undefined;
+      const semitonesAt = src.pitch_env ? (t: number) => pitchEnvSemitones(src.pitch_env!, t) : () => 0;
       return {
         sampleRate,
         channels: matched.channels.map((ch) => {
-          const out = new Float32Array(lengthSamples);
-          out.set(ch.subarray(0, Math.min(ch.length, lengthSamples)));
-          return out;
+          if (!pitched) {
+            // pad or trim to the layer length
+            const out = new Float32Array(lengthSamples);
+            out.set(ch.subarray(0, Math.min(ch.length, lengthSamples)));
+            return out;
+          }
+          return varispeed(ch, lengthSamples, src.rate, semitonesAt);
         }),
       };
     }
@@ -183,6 +192,30 @@ function trimTail(mix: AudioBuf, minSamples: number, sampleRate: number): AudioB
   const outLen = Math.min(n, Math.max(minSamples, last + 1 + pad));
   if (outLen >= n) return mix;
   return { sampleRate: mix.sampleRate, channels: mix.channels.map((ch) => ch.slice(0, outLen)) };
+}
+
+/**
+ * One-pole DC blocker (~5 Hz high-pass) on the master bus: y[n] = x[n] - x[n-1]
+ * + R*y[n-1]. Removes DC that appears after the per-layer highpass slot — e.g.
+ * from a bus waveshaper's asymmetric transfer — which no layer filter can reach.
+ * It decays trailing silence cleanly to zero (so tail trimming still works),
+ * unlike mean-subtraction which would leave a DC pedestal. The finite-length
+ * startup transient leaves a small residual in the whole-buffer DC metric that
+ * shrinks with duration, so very short, heavily-DC sounds may still trip E102.
+ */
+export function applyDcBlock(mix: AudioBuf): void {
+  const R = Math.exp((-2 * Math.PI * 5) / mix.sampleRate);
+  for (const ch of mix.channels) {
+    let prevIn = 0;
+    let prevOut = 0;
+    for (let i = 0; i < ch.length; i++) {
+      const x = ch[i];
+      const y = x - prevIn + R * prevOut;
+      prevIn = x;
+      prevOut = y;
+      ch[i] = y;
+    }
+  }
 }
 
 function applyMasterFades(mix: AudioBuf, recipe: Recipe): void {
@@ -287,6 +320,8 @@ export async function renderRecipe(recipe: Recipe, ctx: EngineContext, variantIn
   for (const ch of mix.channels) {
     for (let i = 0; i < ch.length; i++) ch[i] *= masterGain;
   }
+
+  if (recipe.master.dc_block) applyDcBlock(mix);
 
   let finalMix = mix;
   if (recipe.loop.enabled) {
