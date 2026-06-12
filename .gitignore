@@ -1,0 +1,13 @@
+node_modules/
+dist/
+tmp-preview/
+*.tsbuildinfo
+
+# dogfood workspace artifacts (the local .mcp.json points the workspace at the repo root)
+sounds/
+history/
+refs/
+renders/
+exports/
+audition/
+project.json

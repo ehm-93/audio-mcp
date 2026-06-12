@@ -1,0 +1,39 @@
+{
+  "name": "mixdown",
+  "version": "0.2.0",
+  "description": "MCP server for designing, analyzing, and exporting game sound effects as deterministic synthesis recipes",
+  "license": "MIT-0",
+  "author": "",
+  "type": "module",
+  "bin": {
+    "mixdown": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@napi-rs/canvas": "^1.0.0",
+    "@wasm-audio-decoders/flac": "^0.2.10",
+    "@wasm-audio-decoders/ogg-vorbis": "^0.1.20",
+    "fft.js": "^4.0.4",
+    "wasm-media-encoders": "^0.7.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
