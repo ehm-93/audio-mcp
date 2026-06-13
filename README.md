@@ -48,7 +48,8 @@ workspace/
 | `patch_layer` | merge patch one layer by id without resending the layers array |
 | `list_presets` | every enum the server accepts — call once per session |
 | `render` | render (cached by content hash) → analysis bundle, lint findings, spectrogram/waveform PNGs |
-| `compare` | metric deltas, per-band energy deltas, stacked spectrograms on identical axes |
+| `preview` | stateless render of an inline recipe — same analysis as `render`, zero workspace writes; for parallel exploration (subagents iterate, commit the winner with `write_recipe`) |
+| `compare` | metric deltas, per-band energy deltas, stacked spectrograms on identical axes; each side is a soundref or an inline recipe |
 | `lint` | findings only, served from the render cache |
 | `make_variants` | write the variants block, render the family, return a table + strip image |
 | `import_reference` | copy outside audio into `refs/` and analyze it |

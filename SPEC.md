@@ -320,3 +320,13 @@ Engine 0.2.0, shaped by the first real design sessions. All recipe additions are
 **Lint intent.** `lint: { allow: ["W206", ...] }` suppresses findings a recipe triggers deliberately (e.g. a riser that ends at peak). Suppressed findings are reported separately and do not block export.
 
 **Tools.** `patch_layer(name, layer_id, patch)` applies a merge patch to one layer by id (null removes it) — single-field edits no longer resend the layers array. `freeze(ref, name?)` bounces a rendered sound into `refs/` for use as a sample, granular, or IR source. `make_variants` no longer bumps the version when the variants block is unchanged. `hidden: true` keeps working-material recipes off the audition page. Eighteen tools total.
+
+## Stateless mode
+
+Built for multi-agent sessions: when several subagents explore candidates for the same sound, the write-then-render loop makes them race on the head version and pollute history. Stateless tools carry the recipe inline instead, so the only shared state is the content-addressed render cache, which is conflict-free by construction (identical content maps to identical files).
+
+**preview(recipe, variant?, images?, strict?)** renders a full inline recipe document and returns the same analysis bundle, lint findings, and images as `render` — without touching `sounds/` or `history/`, and with no version bump. The cache key is pure content, so previewing a document and later committing it with `write_recipe` costs one render. The recipe's `name` only labels the cached wav and defaults to `preview`.
+
+**compare** accepts an inline recipe document for either side, rendered the same stateless way, so a candidate can be measured against the stored head or a reference before anything is written.
+
+The intended flow: subagents iterate with `preview` (and `compare` against the head or a ref), keeping their candidate in their own context; the orchestrator commits the winner once with `write_recipe`. Nineteen tools total.

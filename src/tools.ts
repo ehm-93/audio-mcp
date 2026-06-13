@@ -12,7 +12,7 @@ import { Renderer, RenderedSound } from "./core/renderer.js";
 import { parseSoundRef } from "./core/soundref.js";
 import { exportSound, ManifestEntry } from "./core/exporter.js";
 import { generateAuditionPage, AuditionSound } from "./core/audition.js";
-import { ValidationError, jitterSchema, validateOrThrow, collectUnknownKeys } from "./schema.js";
+import { ValidationError, jitterSchema, recipeSchema, validateOrThrow, collectUnknownKeys } from "./schema.js";
 import { worstSeverity } from "./analysis/lint.js";
 import { renderSpectrogramPng, renderWaveformPng, renderComparePng, renderVariantStripPng } from "./analysis/spectrogram.js";
 import { BANDS } from "./analysis/spectral.js";
@@ -417,27 +417,75 @@ export async function createServer(wsRoot: string): Promise<{ server: McpServer;
   );
 
   server.registerTool(
+    "preview",
+    {
+      description:
+        "Stateless render: pass a full recipe document inline and get the analysis bundle, lint findings, and images back without touching the workspace — no version bump, no history entry, nothing under sounds/. Uses the same content-addressed render cache as render, so previewing then committing the identical document costs one render. Built for parallel exploration (e.g. several subagents iterating on candidates for the same sound); commit the winner with write_recipe. The recipe's name only labels the cached wav and defaults to \"preview\". Unknown keys are dropped with a warning; pass strict: true to refuse instead.",
+      inputSchema: {
+        recipe: z.record(z.string(), z.unknown()),
+        variant: z.number().int().min(1).optional().describe("render variant n of the recipe's variants block"),
+        images: z.enum(["none", "spectrogram", "spectrogram+waveform"]).default("spectrogram"),
+        strict: z.boolean().default(false).describe("refuse the render if any key would be dropped, instead of warning"),
+      },
+    },
+    guard(async ({ recipe, variant, images, strict }) => {
+      const { warnings, error } = checkUnknownKeys(recipe, strict);
+      if (error) return error;
+      const validated = validateOrThrow(recipeSchema, { name: "preview", ...recipe });
+      const sound = await renderer.renderRecipe(validated, { variant });
+      const title = variant !== undefined ? `${validated.name}#${variant}` : validated.name;
+      const imgs: Buffer[] = [];
+      if (images !== "none") {
+        const s = renderer.stftOf(sound);
+        imgs.push(await renderSpectrogramPng(s, sound.bundle.duration_ms, title));
+        if (images === "spectrogram+waveform") imgs.push(await renderWaveformPng(sound.mix, title));
+      }
+      return ok(
+        {
+          stateless: true,
+          name: validated.name,
+          variant: sound.variant,
+          cached: sound.cached,
+          analysis: sound.bundle,
+          lint: findingsSummary(sound),
+          lint_suppressed: suppressedSummary(sound),
+          warnings,
+        },
+        imgs,
+      );
+    }),
+  );
+
+  /** A compare side: a soundref string, or an inline recipe document rendered statelessly like preview. */
+  const refOrRecipe = z.union([z.string(), z.record(z.string(), z.unknown())]);
+  async function resolveRefOrRecipe(input: string | Record<string, unknown>): Promise<{ sound: RenderedSound; title: string }> {
+    if (typeof input === "string") return { sound: await renderer.render(parseSoundRef(input)), title: input };
+    const recipe = validateOrThrow(recipeSchema, { name: "inline", ...input });
+    return { sound: await renderer.renderRecipe(recipe), title: recipe.name };
+  }
+
+  server.registerTool(
     "compare",
     {
-      description: `Compare two sounds: metric deltas (b minus a), a per-band energy delta table, and both spectrograms stacked on identical axes. ${soundrefDesc}`,
+      description: `Compare two sounds: metric deltas (b minus a), a per-band energy delta table, and both spectrograms stacked on identical axes. Each side is a soundref or an inline recipe document (rendered statelessly, like preview). ${soundrefDesc}`,
       inputSchema: {
-        a: z.string(),
-        b: z.string(),
+        a: refOrRecipe,
+        b: refOrRecipe,
       },
     },
     guard(async ({ a, b }) => {
-      const soundA = await renderer.render(parseSoundRef(a));
-      const soundB = await renderer.render(parseSoundRef(b));
+      const A = await resolveRefOrRecipe(a);
+      const B = await resolveRefOrRecipe(b);
       const img = await renderComparePng(
-        { stft: renderer.stftOf(soundA), durationMs: soundA.bundle.duration_ms, title: a },
-        { stft: renderer.stftOf(soundB), durationMs: soundB.bundle.duration_ms, title: b },
+        { stft: renderer.stftOf(A.sound), durationMs: A.sound.bundle.duration_ms, title: A.title },
+        { stft: renderer.stftOf(B.sound), durationMs: B.sound.bundle.duration_ms, title: B.title },
       );
       return ok(
         {
-          a: { ref: a, analysis: soundA.bundle },
-          b: { ref: b, analysis: soundB.bundle },
-          delta_b_minus_a: metricDeltas(soundA.bundle, soundB.bundle),
-          band_energy_delta_db: bandDeltas(soundA.bundle, soundB.bundle),
+          a: { ref: A.title, analysis: A.sound.bundle },
+          b: { ref: B.title, analysis: B.sound.bundle },
+          delta_b_minus_a: metricDeltas(A.sound.bundle, B.sound.bundle),
+          band_energy_delta_db: bandDeltas(A.sound.bundle, B.sound.bundle),
         },
         [img],
       );

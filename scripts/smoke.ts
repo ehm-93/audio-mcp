@@ -1,7 +1,7 @@
 /**
  * Protocol-level smoke test: spawns the built server over stdio and walks a
  * realistic session: list_presets, write_recipe, render (expect a PNG block),
- * make_variants, compare, lint, audition_page, export, history/diff.
+ * preview, make_variants, compare, lint, audition_page, export, history/diff.
  *
  * Usage: node --import tsx scripts/smoke.ts
  */
@@ -45,7 +45,7 @@ function pngCount(result: any): number {
 
 const tools = await client.listTools();
 console.log(`tools: ${tools.tools.length}`);
-check("18 tools registered", tools.tools.length === 18, tools.tools.map((t) => t.name));
+check("19 tools registered", tools.tools.length === 19, tools.tools.map((t) => t.name));
 
 const presets = firstJson(await client.callTool({ name: "list_presets", arguments: {} }));
 check("list_presets has source enums", presets.sources?.osc?.shape?.includes("saw"));
@@ -86,6 +86,13 @@ check("render reports band energies", Object.keys(renderJson.analysis.band_energ
 const rendered2 = firstJson(await client.callTool({ name: "render", arguments: { ref: "laser_zap", images: "none" } }));
 check("second render is cached", rendered2.cached === true);
 
+// stateless preview: render an inline candidate without touching the store
+const candidate = { ...laser, name: "laser_zap", layers: [{ ...laser.layers[0], gain_db: -14 }] };
+const previewJson = firstJson(await client.callTool({ name: "preview", arguments: { recipe: candidate, images: "none" } }));
+check("preview returns analysis statelessly", previewJson.stateless === true && typeof previewJson.analysis?.peak_dbfs === "number", previewJson);
+const headAfterPreview = firstJson(await client.callTool({ name: "read_recipe", arguments: { name: "laser_zap" } }));
+check("preview did not bump the stored head", headAfterPreview.version === 1, headAfterPreview);
+
 const variants: any = await client.callTool({ name: "make_variants", arguments: { name: "laser_zap", count: 4 } });
 const variantsJson = firstJson(variants);
 check("make_variants table has 4 rows", variantsJson.variants?.length === 4, variantsJson);
@@ -94,6 +101,9 @@ check("make_variants returns strip image", pngCount(variants) === 1);
 const compared: any = await client.callTool({ name: "compare", arguments: { a: "laser_zap", b: "laser_zap#2" } });
 const comparedJson = firstJson(compared);
 check("compare returns deltas + stacked image", comparedJson.delta_b_minus_a !== undefined && pngCount(compared) === 1);
+
+const comparedInline: any = await client.callTool({ name: "compare", arguments: { a: "laser_zap", b: candidate } });
+check("compare accepts an inline recipe side", firstJson(comparedInline).delta_b_minus_a !== undefined && pngCount(comparedInline) === 1);
 
 const linted = firstJson(await client.callTool({ name: "lint", arguments: { ref: "laser_zap" } }));
 check("lint returns findings", Array.isArray(linted.findings));

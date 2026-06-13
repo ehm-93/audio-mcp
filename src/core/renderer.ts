@@ -75,8 +75,21 @@ export class Renderer {
   }
 
   async renderRecipeVersion(name: string, version?: number, variant?: number): Promise<RenderedSound> {
-    const project = await this.ws.loadProject();
     const { version: v, recipe } = await this.store.read(name, version);
+    return this.renderRecipe(recipe, { variant, version: v });
+  }
+
+  /**
+   * Render an already-validated recipe through the content-addressed cache
+   * without consulting the store — the stateless path. The cache key is pure
+   * content, so identical recipes hit the same entry whether they arrive
+   * inline or from a stored version: previewing then committing costs one
+   * render, and parallel callers never contend on version state.
+   */
+  async renderRecipe(recipe: Recipe, opts: { variant?: number; version?: number } = {}): Promise<RenderedSound> {
+    const { variant, version: v } = opts;
+    const project = await this.ws.loadProject();
+    const name = recipe.name;
 
     if (variant !== undefined) {
       const count = recipe.variants?.count ?? 0;
